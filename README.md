@@ -1,83 +1,110 @@
 # Route Weather 🌦️🚚
 
-Check the weather along an **entire ground-transportation route** — not just at
-the start and end. The tool figures out *when you'll actually be at each point*
-along the drive and pulls the forecast for that place **at that time**, then
-flags driving hazards and active severe-weather alerts.
+Weather intelligence for **ground transportation routes**. The tool figures
+out *when you'll actually be at each point* along a drive and pulls the
+forecast for that place **at that time**, flags driving hazards, adjusts your
+ETA for the weather itself, and can compare routes, pick your best departure
+time, watch a trip for changes, and put a whole fleet on one dashboard.
 
 Works anywhere in the world, uses only free APIs, and needs **no API keys**.
 
 ```
 ╭─────────────── Route Weather ────────────────╮
 │ Denver  →  Kansas City                       │
-│ 602 mi · 8h 41m driving · departing Wed 06:00│
+│ 602 mi via I 70 · 8h 41m nominal, 9h 24m in  │
+│ this weather · truck · departing Wed 06:00   │
 ╰──────────────────────────────────────────────╯
  Mile  ETA (local)  Conditions      Temp  Feels  Precip     Wind (gust)        Vis      Risk
     0  Wed 06:00    Clear sky       68°F  67°F   0.00" 0%   8 mph W (14 mph)   15.0 mi  0 Good
-   38  Wed 06:30    Partly cloudy   66°F  65°F   0.00" 5%   10 mph NW (18 mph) 15.0 mi  0 Good
   ...
-  512  Wed 13:30    Thunderstorm    84°F  91°F   0.31" 70%  22 mph S (44 mph)  4.1 mi   8 Severe
+  512  Wed 13:52    Thunderstorm    84°F  91°F   0.31" 70%  22 mph S (44 mph)  4.1 mi   8 Severe
 ```
 
-## What's included
+## Commands
 
-- **Time-matched forecasts** — a 6 PM forecast for the town you reach at 6 PM,
-  not the noon forecast for your whole trip
-- **Full conditions** at every checkpoint: temperature, feels-like, dew point,
-  humidity, precipitation amount + probability, rain vs. snow, snow depth,
-  cloud cover, visibility, sustained wind, gusts, wind direction, UV index
-- **Severe weather**: thunderstorms, hail, freezing rain, snow, fog — plus
-  **active NWS watches/warnings** (US routes) intersecting the route
-- **Driving hazard score (0–10)** per checkpoint: ice-risk detection
-  (precipitation near freezing), high-profile-vehicle wind thresholds,
-  low visibility, flooding-rate rain, extreme heat/cold
-- **Interactive HTML map** (`--html`) — color-coded checkpoints on your route,
-  click any point for its arrival-time forecast
-- **JSON export** (`--json`) for feeding dispatch systems or other scripts
-- Multi-stop trips (`--via`), future departures (`--depart`), metric/imperial
+| Command | What it does |
+|---|---|
+| `check` (default) | Weather along one route, time-matched to your ETAs |
+| `optimize` | Score every departure slot in a window; recommend the safest |
+| `compare` | Score alternate routes between the same two places |
+| `fleet` | One risk-sorted dashboard for many trips (from a JSON file) |
+| `watch` | Re-check a trip, diff against last check; exit 2 if worsened (cron-friendly) |
+| `climate` | What this route is *usually* like in a given month (10-yr history) |
 
 ## Install & run
 
 ```bash
 pip install -r requirements.txt
 
-# Leave now
+# Leave now (implies `check`)
 python -m route_weather "Denver, CO" "Kansas City, MO"
 
-# Tomorrow 6 AM (origin local time), checkpoint every 20 min of driving,
-# with a stop in Salina, plus map + JSON output
-python -m route_weather "Denver, CO" "Kansas City, MO" \
-    --via "Salina, KS" \
-    --depart "2026-07-09 06:00" \
-    --interval 20 \
-    --html trip.html --json trip.json
+# Tomorrow 6 AM, trucking profile, go/no-go rules, map + JSON out
+python -m route_weather check "Denver, CO" "Kansas City, MO" \
+    --via "Salina, KS" --depart "2026-07-09 06:00" --vehicle truck \
+    --rules examples/rules.json --html trip.html --json trip.json
 
-# Relative departure and metric units
-python -m route_weather "Munich" "Vienna" --depart "+3h" --units metric
+# When should I leave? Score every 2 hours across the next day and a half
+python -m route_weather optimize "Denver, CO" "Kansas City, MO" \
+    --window "+0h..+36h" --step 2h
+
+# I-70 or I-80? Compare alternate routes through the weather
+python -m route_weather compare "Denver, CO" "Salt Lake City, UT" --html cmp.html
+
+# Everything the dispatcher needs on one page
+python -m route_weather fleet examples/fleet.json --html fleet.html
+
+# Cron: alert me if my Friday trip's forecast deteriorates
+# 0 */3 * * * route-weather watch "Denver, CO" "Vail, CO" --depart "2026-07-10 07:00" || notify-send "Trip forecast worsened"
+python -m route_weather watch "Denver, CO" "Vail, CO" --depart "+2h"
+
+# What's this drive usually like in January?
+python -m route_weather climate "Denver, CO" "Vail, CO" --month 1
 ```
+
+### Common options
 
 | Option | Meaning |
 |---|---|
 | `--depart` | `now` (default), `+2h`, `+45m`, or `YYYY-MM-DD HH:MM` in origin local time |
 | `--interval` | Minutes of driving between weather checkpoints (default 30) |
 | `--via` | Add an intermediate stop; repeatable |
+| `--vehicle` | `car` (default), `truck`, `van`, `motorcycle`, `bicycle`, `ev` |
+| `--ev-range` | Rated EV range (mi or km per `--units`); enables charging-stop planning |
+| `--rules` | JSON file of hard limits → GO / CAUTION / NO-GO verdict (exit code 3 on NO-GO) |
 | `--units` | `imperial` (default) or `metric` |
-| `--html PATH` | Write an interactive Leaflet map report |
-| `--json PATH` | Write machine-readable trip data |
+| `--html` / `--json` | Interactive Leaflet map report / machine-readable output |
 | `--no-alerts` | Skip NWS alert lookups |
 
-## How it works
+## What it checks
 
-1. **Geocode** origin/stops/destination — OpenStreetMap Nominatim
-2. **Route** the drive — OSRM public server (distance, duration, full geometry
-   with per-segment travel times)
-3. **Sample** checkpoints every N minutes of *driving time* along the geometry
-4. **Forecast** each checkpoint for its ETA — Open-Meteo hourly forecast
-   (up to 16 days out), fetched in one batched request
-5. **Assess** each checkpoint with the hazard rules in
-   `route_weather/hazards.py`
-6. **Alerts** — active NWS watches/warnings for US checkpoints, deduplicated
-7. **Report** — console table, optional HTML map, optional JSON
+- **Full conditions** at every checkpoint: temperature, feels-like, dew point,
+  humidity, precipitation amount + probability, rain vs. snow, snow depth,
+  cloud cover, visibility, sustained wind, gusts, wind direction, UV index
+- **Severe weather**: thunderstorms, hail, freezing rain, snow, fog — plus
+  **active NWS watches/warnings** (US) intersecting the route
+- **Driving hazard score (0–10)** per checkpoint with per-vehicle thresholds:
+  - ice-risk detection (precipitation near freezing)
+  - **crosswind component vs. your road heading** for high-profile vehicles —
+    a 40 mph wind matters far more broadside than head-on
+  - rain sensitivity for two-wheelers; wind-chill-relevant cold limits
+  - **night driving** through hazards and **low-sun glare** in your direction
+    of travel (sun position computed per checkpoint)
+- **Weather-adjusted ETAs**: heavy snow/ice/fog slow the projected speed
+  (FHWA-style factors), which shifts every downstream arrival time — and can
+  change what weather you hit later, so forecasts are re-matched iteratively
+- **EV range model** (`--vehicle ev`): temperature efficiency curve +
+  headwind/tailwind penalty → effective range and suggested charging stops
+- **Go/no-go rules**: your hard limits in JSON (`examples/rules.json`);
+  violations produce a NO-GO verdict and exit code 3 for scripting
+
+### The HTML maps
+
+Every map report is a single self-contained page: the route line, color-coded
+checkpoints (click for the arrival-time forecast), suggested EV charging
+stops, and a **live radar overlay toggle** (RainViewer). `compare` draws all
+route options; `fleet` draws every trip colored by its peak risk with a
+risk-sorted table.
 
 ### Hazard scoring
 
@@ -85,71 +112,38 @@ python -m route_weather "Munich" "Vienna" --depart "+3h" --units metric
 |---|---|---|
 | 0–2 | 🟢 Good | clear, light rain, light drizzle |
 | 3–4 | 🟡 Caution | light snow, fog, gusty winds, reduced visibility |
-| 5–7 | 🟠 Hazardous | heavy rain, moderate snow, thunderstorms, high gusts, ice risk |
+| 5–7 | 🟠 Hazardous | heavy rain, moderate snow, thunderstorms, high gusts, ice risk, strong crosswinds |
 | 8–10 | 🔴 Severe | freezing rain, heavy snow, hail, damaging winds, near-zero visibility |
-
-Modifiers stack on the base condition: ice risk (precip at ≤34°F), gust
-thresholds (25/37/50 mph), visibility bands, downpour rate, extreme temps.
 
 ### Data sources (all free, no keys)
 
 | Service | Used for | Notes |
 |---|---|---|
-| [Open-Meteo](https://open-meteo.com/) | Hourly forecasts | Global, 16-day horizon |
-| [OSRM demo server](http://project-osrm.org/) | Driving routes | Fair-use public instance |
+| [Open-Meteo](https://open-meteo.com/) | Hourly forecasts | Global, 16-day horizon, one batched request per trip |
+| [Open-Meteo archive](https://open-meteo.com/en/docs/historical-weather-api) | `climate` history | ERA5 reanalysis |
+| [OSRM demo server](http://project-osrm.org/) | Driving routes + alternates | Fair-use public instance |
 | [Nominatim](https://nominatim.org/) | Geocoding | Rate-limited to 1 req/s |
 | [NWS api.weather.gov](https://www.weather.gov/documentation/services-web-api) | Severe weather alerts | US only; skipped elsewhere |
+| [RainViewer](https://www.rainviewer.com/api.html) | Radar tiles on maps | Loaded client-side in the browser |
 
 **Limitations to know about:** ETAs assume typical traffic (OSRM has no live
-traffic); NWS alerts are *currently active* ones, so for departures days out
-they describe today, not your travel day; forecasts cap at 16 days; the public
-OSRM/Nominatim servers are fair-use — swap in your own instances for heavy use.
+traffic) before weather adjustment; NWS alerts are *currently active* ones, so
+for departures days out they describe today, not your travel day; forecasts
+cap at 16 days; the radar overlay shows conditions *now*, which is only
+meaningful for imminent departures; the public OSRM/Nominatim servers are
+fair-use — swap in your own instances for heavy production use.
 
 ## Ideas / where this could go next
 
-Things that would make this genuinely powerful, roughly ordered by bang-for-buck:
-
-**Smarter trip decisions**
-- **Departure-time optimizer** — score the same route departing every hour
-  across a window ("leave between Fri 6 AM and Sat noon") and recommend the
-  safest/driest slot. The scoring machinery already exists; this is a loop.
-- **Route comparison** — OSRM can return alternate routes; score each and
-  recommend "I-70 vs I-80 through the storm" with a risk-per-route summary.
-- **Weather-aware ETA adjustment** — slow the projected speed through heavy
-  snow/rain segments (e.g., FHWA speed-reduction factors), which shifts every
-  downstream ETA and can change what weather you hit later.
-- **Go / no-go rule engine** — user-defined thresholds ("never route me
-  through gusts > 45 mph with an empty trailer") producing a single verdict.
-
-**Better data**
-- Road-surface temperature and pavement frost modeling (Open-Meteo exposes
-  soil temperature layers — a good proxy for bridge icing)
-- NWS *forecast* products (watches vs. warnings timing) matched to your ETA,
-  not just currently-active alerts; outside the US, MeteoAlarm for Europe
-- Live radar overlay on the HTML map (RainViewer tiles are free)
-- Traffic-aware routing (Google/HERE/TomTom APIs) for realistic ETAs
-- Sunrise/sunset per checkpoint — flag night driving through hazards, and
-  sun-glare warnings when driving into a low sun azimuth
-
-**Different vehicles & modes**
-- **Trucking mode**: high-profile crosswind risk by heading (wind *direction
-  relative to the road bearing* matters more than speed), chain-law alerts for
-  mountain passes, hours-of-service-aware rest-stop suggestions timed to let
-  storms pass
-- **Motorcycle/bicycle mode**: lower wind & rain thresholds, wind-chill at
-  riding speed
-- **EV mode**: temperature-adjusted range estimates and charging-stop planning
-- Rail/transit variant: GTFS feeds instead of OSRM
-
-**Delivery & experience**
-- A small web UI (FastAPI + the existing HTML map) or mobile PWA
-- Scheduled monitoring: re-check a saved trip every few hours and
-  email/text/Slack when the forecast for your departure worsens
-- Fleet dashboard: many active routes on one map, sorted by risk
-- Voice/LLM summary: "You'll hit freezing rain west of Salina around 9 PM —
-  leaving 3 hours earlier avoids it entirely"
-- Historical mode: "what's this route usually like in January?" using
-  Open-Meteo's climate archive
+- NWS *forecast* products (watch/warning timing) matched to ETAs, and
+  MeteoAlarm for Europe
+- Road-surface temperature via Open-Meteo soil layers (bridge-icing proxy)
+- Traffic-aware routing (HERE/TomTom) feeding the same weather pipeline
+- Chain-law / mountain-pass status feeds (state DOT APIs)
+- Hours-of-service-aware rest stops timed so storms pass while you sleep
+- Push notifications (email/SMS/Slack) on `watch` worsening — today you get
+  the exit code for cron to act on
+- A small FastAPI web UI wrapping these same modules; GTFS transit variant
 
 ## Development
 
@@ -158,5 +152,5 @@ pip install -r requirements.txt pytest
 python -m pytest tests/
 ```
 
-The test suite includes a fully mocked end-to-end pipeline run, so it passes
-without network access.
+The test suite mocks all HTTP, so it passes without network access — including
+full CLI runs of every subcommand.

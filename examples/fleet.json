@@ -1,0 +1,25 @@
+{
+  "trips": [
+    {
+      "name": "Truck 12",
+      "origin": "Denver, CO",
+      "destination": "Kansas City, MO",
+      "depart": "+1h",
+      "vehicle": "truck"
+    },
+    {
+      "name": "Van 3",
+      "origin": "Omaha, NE",
+      "destination": "Des Moines, IA",
+      "depart": "2026-07-09 06:00",
+      "vehicle": "van"
+    },
+    {
+      "name": "EV shuttle",
+      "origin": "Salt Lake City, UT",
+      "destination": "Boise, ID",
+      "vehicle": "ev",
+      "ev_range": 400
+    }
+  ]
+}

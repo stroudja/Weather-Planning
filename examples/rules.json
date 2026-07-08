@@ -1,0 +1,9 @@
+{
+  "max_score": 7,
+  "max_gust_kmh": 80,
+  "max_crosswind_kmh": 50,
+  "min_visibility_m": 400,
+  "max_snowfall_cm_h": 1.0,
+  "block_ice": true,
+  "block_events": ["Tornado Warning", "Blizzard Warning", "Ice Storm Warning"]
+}

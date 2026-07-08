@@ -1,7 +1,12 @@
-"""Time-matched point forecasts from Open-Meteo (free, no API key).
+"""Forecasts from Open-Meteo (free, no API key).
 
 All values are fetched in metric units; display conversion happens in the
 report layer so hazard scoring always sees consistent units.
+
+The full hourly series is fetched once per checkpoint (`fetch_series`) and
+then time-matched locally (`assign_forecast`), so re-evaluating a different
+departure time — the optimizer, weather-adjusted ETAs — costs no extra
+API calls.
 """
 
 import datetime as dt
@@ -44,23 +49,21 @@ def get_utc_offset(lat: float, lon: float) -> int:
     return int(resp.json().get("utc_offset_seconds", 0))
 
 
-def fetch_weather(points: list, depart_utc: dt.datetime) -> None:
-    """Attach a time-matched forecast dict to each RoutePoint in `points`.
+def fetch_series(points: list, start_utc: dt.datetime, end_utc: dt.datetime) -> None:
+    """Fetch the hourly forecast series for every RoutePoint in one request.
 
-    Each point gets point.weather = {var: value, ..., "eta_utc": datetime,
-    "utc_offset_s": int}. Values are the forecast for the hour nearest the
-    point's ETA.
+    Attaches point.series = {"time": [unix...], <var>: [...], "utc_offset_s": int}.
     """
-    etas = [depart_utc + dt.timedelta(seconds=p.eta_offset_s) for p in points]
-    horizon = etas[-1] - dt.datetime.now(dt.timezone.utc)
-    if horizon > dt.timedelta(days=MAX_FORECAST_DAYS):
+    now = dt.datetime.now(dt.timezone.utc)
+    if end_utc - now > dt.timedelta(days=MAX_FORECAST_DAYS):
         raise ValueError(
-            f"Arrival is {horizon.days} days out; forecasts only cover "
-            f"{MAX_FORECAST_DAYS} days ahead."
+            f"Trip extends {(end_utc - now).days} days out; forecasts only "
+            f"cover {MAX_FORECAST_DAYS} days ahead."
         )
 
-    start_date = min(etas[0], dt.datetime.now(dt.timezone.utc)).date()
-    end_date = etas[-1].date() + dt.timedelta(days=1)
+    start_date = min(start_utc, now).date() - dt.timedelta(days=1)
+    end_date = min(end_utc.date() + dt.timedelta(days=1),
+                   now.date() + dt.timedelta(days=MAX_FORECAST_DAYS))
 
     resp = requests.get(
         FORECAST_URL,
@@ -71,7 +74,7 @@ def fetch_weather(points: list, depart_utc: dt.datetime) -> None:
             "timezone": "auto",
             "timeformat": "unixtime",
             "start_date": start_date.isoformat(),
-            "end_date": min(end_date, start_date + dt.timedelta(days=MAX_FORECAST_DAYS)).isoformat(),
+            "end_date": end_date.isoformat(),
         },
         timeout=60,
     )
@@ -83,13 +86,37 @@ def fetch_weather(points: list, depart_utc: dt.datetime) -> None:
             f"Weather API returned {len(locations)} locations for {len(points)} points"
         )
 
-    for point, eta, loc in zip(points, etas, locations):
-        hourly = loc["hourly"]
-        times = hourly["time"]  # unix timestamps (UTC)
-        eta_ts = eta.timestamp()
-        idx = min(range(len(times)), key=lambda i: abs(times[i] - eta_ts))
-        weather = {var: (hourly.get(var) or [None])[idx] if hourly.get(var) else None
-                   for var in HOURLY_VARS}
-        weather["eta_utc"] = eta
-        weather["utc_offset_s"] = int(loc.get("utc_offset_seconds", 0))
-        point.weather = weather
+    for point, loc in zip(points, locations):
+        series = dict(loc["hourly"])
+        series["utc_offset_s"] = int(loc.get("utc_offset_seconds", 0))
+        point.series = series
+
+
+def forecast_at(series: dict, when_utc: dt.datetime) -> dict:
+    """Nearest-hour forecast values from a fetched series."""
+    times = series["time"]
+    ts = when_utc.timestamp()
+    idx = min(range(len(times)), key=lambda i: abs(times[i] - ts))
+    weather = {}
+    for var in HOURLY_VARS:
+        values = series.get(var)
+        weather[var] = values[idx] if values else None
+    weather["eta_utc"] = when_utc
+    weather["utc_offset_s"] = series["utc_offset_s"]
+    return weather
+
+
+def assign_forecast(points: list, depart_utc: dt.datetime) -> None:
+    """Set point.weather for each point's current eta_offset_s."""
+    for p in points:
+        eta = depart_utc + dt.timedelta(seconds=p.eta_offset_s)
+        p.weather = forecast_at(p.series, eta)
+
+
+def fetch_weather(points: list, depart_utc: dt.datetime) -> None:
+    """Convenience: fetch series covering the trip and assign forecasts."""
+    if not points:
+        return
+    end = depart_utc + dt.timedelta(seconds=points[-1].eta_offset_s * 2.5 + 7200)
+    fetch_series(points, depart_utc, end)
+    assign_forecast(points, depart_utc)

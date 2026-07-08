@@ -15,16 +15,19 @@ class Route:
     cum_distance: list    # meters of travel to reach coords[i]
     total_duration: float
     total_distance: float
+    name: str = ""        # OSRM route summary, e.g. "I 70, I 435"
 
 
 @dataclass
 class RoutePoint:
     lat: float
     lon: float
-    eta_offset_s: float   # seconds after departure
+    eta_offset_s: float   # seconds after departure (weather-adjusted later)
     distance_m: float     # meters from route start
+    road_bearing: float | None = None   # direction of travel, degrees (0=N)
     label: str = ""
     weather: dict = field(default_factory=dict)
+    series: dict = field(default_factory=dict)   # full hourly forecast arrays
     hazards: list = field(default_factory=list)
     score: int = 0
     alerts: list = field(default_factory=list)
@@ -37,25 +40,16 @@ def _haversine_m(a, b):
     return 6371000 * 2 * math.asin(math.sqrt(h))
 
 
-def get_route(waypoints: list) -> Route:
-    """Fetch a driving route through waypoints [{"lat":..,"lon":..}, ...]."""
-    coord_str = ";".join(f"{w['lon']},{w['lat']}" for w in waypoints)
-    resp = requests.get(
-        OSRM_URL + coord_str,
-        params={
-            "overview": "full",
-            "geometries": "geojson",
-            "annotations": "duration,distance",
-            "steps": "false",
-        },
-        headers={"User-Agent": "route-weather/0.1"},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("code") != "Ok" or not data.get("routes"):
-        raise RuntimeError(f"Routing failed: {data.get('code')} {data.get('message', '')}")
-    route = data["routes"][0]
+def bearing_deg(a, b) -> float:
+    """Initial bearing from point a to point b, degrees clockwise from north."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    dlon = lon2 - lon1
+    x = math.sin(dlon) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    return math.degrees(math.atan2(x, y)) % 360
+
+
+def _parse_route(route: dict) -> Route:
     coords = [(lat, lon) for lon, lat in route["geometry"]["coordinates"]]
 
     # Per-segment durations/distances, concatenated across legs, align with
@@ -80,13 +74,64 @@ def get_route(waypoints: list) -> Route:
         total = cum_dist[-1] or 1.0
         cum_dur = [route["duration"] * d / total for d in cum_dist]
 
+    name = ", ".join(
+        leg.get("summary", "") for leg in route["legs"] if leg.get("summary"))
     return Route(
         coords=coords,
         cum_duration=cum_dur,
         cum_distance=cum_dist,
         total_duration=route["duration"],
         total_distance=route["distance"],
+        name=name,
     )
+
+
+def get_routes(waypoints: list, alternatives: bool = False) -> list:
+    """Fetch driving route(s) through waypoints [{"lat":..,"lon":..}, ...].
+
+    Returns a list of Route (one unless alternatives=True; OSRM only offers
+    alternatives for two-waypoint requests).
+    """
+    coord_str = ";".join(f"{w['lon']},{w['lat']}" for w in waypoints)
+    resp = requests.get(
+        OSRM_URL + coord_str,
+        params={
+            "overview": "full",
+            "geometries": "geojson",
+            "annotations": "duration,distance",
+            "steps": "false",
+            "alternatives": "true" if alternatives and len(waypoints) == 2 else "false",
+        },
+        headers={"User-Agent": "route-weather/0.1"},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != "Ok" or not data.get("routes"):
+        raise RuntimeError(f"Routing failed: {data.get('code')} {data.get('message', '')}")
+    return [_parse_route(r) for r in data["routes"]]
+
+
+def get_route(waypoints: list) -> Route:
+    return get_routes(waypoints)[0]
+
+
+def _bearing_at(route: Route, i: int) -> float | None:
+    """Direction of travel at geometry vertex i, smoothed over ~the next km."""
+    n = len(route.coords)
+    if n < 2:
+        return None
+    j = i
+    target = route.cum_distance[min(i, n - 1)] + 1000
+    while j < n - 1 and route.cum_distance[j] < target:
+        j += 1
+    if j == i:
+        j = min(i + 1, n - 1)
+    if j == i:
+        i = max(i - 1, 0)
+    if route.coords[i] == route.coords[j]:
+        return None
+    return bearing_deg(route.coords[i], route.coords[j])
 
 
 def sample_route(route: Route, interval_s: float) -> list:
@@ -106,6 +151,7 @@ def sample_route(route: Route, interval_s: float) -> list:
             lat=lat, lon=lon,
             eta_offset_s=route.cum_duration[i],
             distance_m=route.cum_distance[i],
+            road_bearing=_bearing_at(route, i),
         ))
         target += interval_s
 
@@ -116,5 +162,6 @@ def sample_route(route: Route, interval_s: float) -> list:
             lat=lat, lon=lon,
             eta_offset_s=route.total_duration,
             distance_m=route.total_distance,
+            road_bearing=_bearing_at(route, n - 1),
         ))
     return points

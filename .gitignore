@@ -3,4 +3,7 @@ __pycache__/
 .pytest_cache/
 trip.html
 trip.json
+fleet.html
+cmp.html
+.route-weather-state.json
 .venv/
